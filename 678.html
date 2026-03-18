@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Expense Intelligence</title>
+    <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root { --accent: #4f46e5; --bg: #f8fafc; --card: #ffffff; --border: #e2e8f0; }
+        body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); margin: 0; padding: 20px; color: #1e293b; }
+        .wrapper { max-width: 1200px; margin: 0 auto; display: grid; grid-template-columns: 300px 1fr; gap: 24px; }
+        
+        /* Sidebar */
+        .sidebar { background: var(--card); padding: 24px; border-radius: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); height: fit-content; border: 1px solid var(--border); }
+        .upload-area { border: 2px dashed #cbd5e1; padding: 20px; text-align: center; border-radius: 12px; cursor: pointer; background: #f1f5f9; transition: 0.2s; }
+        .upload-area:hover { border-color: var(--accent); background: #eef2ff; }
+        
+        /* Dashboard Cards */
+        .dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .card { background: var(--card); padding: 24px; border-radius: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); border: 1px solid var(--border); }
+        .full-width { grid-column: span 2; }
+        
+        /* Progress Bars */
+        .breakdown-row { display: flex; align-items: center; gap: 15px; margin-bottom: 12px; font-size: 0.9rem; }
+        .progress-container { flex-grow: 1; height: 8px; background: #f1f5f9; border-radius: 4px; overflow: hidden; }
+        .progress-fill { height: 100%; transition: width 0.5s ease; }
+        .cat-label { width: 100px; font-weight: 600; }
+
+        /* Expense Table */
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th { text-align: left; padding: 12px; background: #f8fafc; color: #64748b; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
+        td { padding: 12px; border-bottom: 1px solid #f1f5f9; font-size: 0.95rem; }
+        .btn-del { color: #ef4444; cursor: pointer; background: none; border: none; font-size: 0.8rem; font-weight: 600; }
+        
+        #scan-status { font-size: 0.8rem; margin-top: 10px; color: var(--accent); font-weight: 500; display: none; }
+    </style>
+</head>
+<body>
+
+<div class="wrapper">
+    <aside class="sidebar">
+        <h2 style="margin-top:0">Scan Hub</h2>
+        <div class="upload-area" onclick="document.getElementById('fileInput').click()">
+            <p style="margin:0"><strong>Upload Receipts</strong></p>
+            <p style="margin:5px 0 0; font-size:0.8rem; color:#64748b">Images supported (JPG/PNG)</p>
+            <input type="file" id="fileInput" hidden multiple accept="image/*">
+        </div>
+        <div id="scan-status">Scanning...</div>
+        
+        <div style="margin-top:40px">
+            <p style="font-size:0.8rem; color:#64748b; margin-bottom:5px">Total Expenses</p>
+            <div style="font-size:2rem; font-weight:800; color:var(--accent)">$<span id="total-amount">0.00</span></div>
+            <button onclick="exportCSV()" style="width:100%; padding:12px; background:var(--accent); color:white; border:none; border-radius:8px; margin-top:15px; cursor:pointer">Export to CSV</button>
+            <button onclick="clearAll()" style="width:100%; padding:8px; background:none; color:#ef4444; border:none; margin-top:5px; cursor:pointer; font-size:0.8rem">Clear Database</button>
+        </div>
+    </aside>
+
+    <main class="dashboard-grid">
+        <div class="card">
+            <h3 style="margin-top:0">Spending Distribution</h3>
+            <div style="max-height: 200px; display:flex; justify-content:center">
+                <canvas id="pieChart"></canvas>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3 style="margin-top:0">Category Breakdown</h3>
+            <div id="breakdown-list">
+                <div class="breakdown-row"><span class="cat-label">Shopping</span><div class="progress-container"><div id="bar-shopping" class="progress-fill" style="background:#f59e0b; width:0%"></div></div><span id="txt-shopping">0%</span></div>
+                <div class="breakdown-row"><span class="cat-label">Food</span><div class="progress-container"><div id="bar-food" class="progress-fill" style="background:#4f46e5; width:0%"></div></div><span id="txt-food">0%</span></div>
+                <div class="breakdown-row"><span class="cat-label">Bills</span><div class="progress-container"><div id="bar-bills" class="progress-fill" style="background:#10b981; width:0%"></div></div><span id="txt-bills">0%</span></div>
+                <div class="breakdown-row"><span class="cat-label">Other</span><div class="progress-container"><div id="bar-other" class="progress-fill" style="background:#94a3b8; width:0%"></div></div><span id="txt-other">0%</span></div>
+            </div>
+        </div>
+
+        <div class="card full-width">
+            <h3 style="margin-top:0">Receipt Ledger</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Receipt Name</th>
+                        <th>Category</th>
+                        <th>Confidence</th>
+                        <th>Amount</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="ledger-body">
+                    </tbody>
+            </table>
+        </div>
+    </main>
+</div>
+
+<script>
+    let expenses = JSON.parse(localStorage.getItem('expense_db')) || [];
+    let pieChart;
+
+    function init() {
+        const ctx = document.getElementById('pieChart').getContext('2d');
+        pieChart = new Chart(ctx, {
+            type: 'doughnut',
+            data: { labels: ['Shopping', 'Food', 'Bills', 'Other'], datasets: [{ data:[0,0,0,0], backgroundColor: ['#f59e0b', '#4f46e5', '#10b981', '#94a3b8'], borderWeight: 0 }] },
+            options: { cutout: '70%', plugins: { legend: { display: false } } }
+        });
+        updateUI();
+    }
+
+    document.getElementById('fileInput').addEventListener('change', async (e) => {
+        const files = Array.from(e.target.files);
+        const status = document.getElementById('scan-status');
+        status.style.display = 'block';
+
+        for (let file of files) {
+            status.innerText = `Processing: ${file.name}`;
+            try {
+                const result = await Tesseract.recognize(file, 'eng');
+                const text = result.data.text;
+                const matches = text.match(/\d+\.\d{2}/g);
+                const amount = matches ? Math.max(...matches.map(Number)) : 0;
+                
+                // Simple Logic for Category
+                let cat = "Other";
+                if(amount < 30) cat = "Food";
+                else if(amount > 150) cat = "Bills";
+                else cat = "Shopping";
+
+                expenses.push({ id: Date.now() + Math.random(), name: file.name, amount, cat, conf: Math.round(result.data.confidence) });
+                save();
+            } catch (err) { console.error(err); }
+        }
+        status.style.display = 'none';
+    });
+
+    function save() {
+        localStorage.setItem('expense_db', JSON.stringify(expenses));
+        updateUI();
+    }
+
+    function updateUI() {
+        const body = document.getElementById('ledger-body');
+        body.innerHTML = '';
+        let total = 0;
+        let sums = { Shopping: 0, Food: 0, Bills: 0, Other: 0 };
+
+        expenses.forEach((item, index) => {
+            total += item.amount;
+            sums[item.cat] += item.amount;
+            
+            const row = `<tr>
+                <td>${item.name}</td>
+                <td><span style="background:#f1f5f9; padding:4px 8px; border-radius:4px; font-size:0.8rem">${item.cat}</span></td>
+                <td style="color:#64748b">${item.conf}%</td>
+                <td><strong>$${item.amount.toFixed(2)}</strong></td>
+                <td><button class="btn-del" onclick="removeEntry(${item.id})">Delete</button></td>
+            </tr>`;
+            body.insertAdjacentHTML('beforeend', row);
+        });
+
+        document.getElementById('total-amount').innerText = total.toFixed(2);
+        
+        // Update Chart & Bars
+        pieChart.data.datasets[0].data = [sums.Shopping, sums.Food, sums.Bills, sums.Other];
+        pieChart.update();
+
+        ['shopping', 'food', 'bills', 'other'].forEach(c => {
+            const key = c.charAt(0).toUpperCase() + c.slice(1);
+            const pct = total > 0 ? (sums[key] / total * 100).toFixed(0) : 0;
+            document.getElementById(`bar-${c}`).style.width = pct + '%';
+            document.getElementById(`txt-${c}`).innerText = pct + '%';
+        });
+    }
+
+    function removeEntry(id) {
+        expenses = expenses.filter(e => e.id !== id);
+        save();
+    }
+
+    function clearAll() { if(confirm("Clear all data?")) { expenses = []; save(); } }
+
+    function exportCSV() {
+        let csv = "Name,Category,Amount\n" + expenses.map(e => `${e.name},${e.cat},${e.amount}`).join("\n");
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = 'expenses.csv'; a.click();
+    }
+
+    init();
+</script>
+</body>
+</html>
